@@ -1,0 +1,63 @@
+name: share-pool-verify
+
+# 只为验证「共享账号池」这次改造：
+#   analyze 作业拿静态分析结论，build 作业顺带出未签名 APK。
+# 两个作业互不依赖，analyze 先出结果。
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: 工具链版本
+        run: |
+          flutter --version
+          dart --version
+      - name: pub get
+        run: flutter pub get
+      - name: analyze
+        run: |
+          set +e
+          flutter analyze > "$GITHUB_WORKSPACE/analyze.log" 2>&1
+          code=$?
+          echo "ANALYZE_EXIT=$code" >> "$GITHUB_WORKSPACE/analyze.log"
+          cat "$GITHUB_WORKSPACE/analyze.log"
+          exit 0
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: analyze-log
+          path: analyze.log
+
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: pub get
+        run: flutter pub get
+      - name: build apk（无 keystore，产出未签名包）
+        run: flutter build apk --release --no-shrink
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: apk
+          path: build/app/outputs/flutter-apk/*.apk
