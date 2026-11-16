@@ -84,6 +84,157 @@ class CloudAccountsPage extends StatelessWidget {
     }
   }
 
+  Future<void> _configureShare(BuildContext context) async {
+    final config = services.cloudShare.config;
+    final server = await askText(
+      context,
+      '账号池地址',
+      initial: config.server,
+      hint: 'http://example.dynv6.net:5301',
+    );
+    if (server == null || !context.mounted) return;
+    final code = await askText(
+      context,
+      '共享邀请码',
+      initial: config.code,
+      hint: '向账号所有者索取',
+    );
+    if (code == null || !context.mounted) return;
+    final result = await busy(
+      context,
+      () => services.configureCloudShare(server: server, code: code),
+      label: '正在同步账号…',
+    );
+    if (!context.mounted || result == null) return;
+    message(
+      context,
+      result.ok
+          ? result.updated.isEmpty
+                ? '账号池没有返回可用账号'
+                : '已同步 ${result.updated.length} 个账号'
+          : result.error,
+    );
+  }
+
+  Future<void> _syncShare(BuildContext context) async {
+    final result = await busy(
+      context,
+      () => services.configureCloudShare(syncNow: true),
+      label: '正在同步账号…',
+    );
+    if (!context.mounted || result == null) return;
+    message(
+      context,
+      result.ok
+          ? result.updated.isEmpty
+                ? '账号池没有返回可用账号'
+                : '已同步 ${result.updated.length} 个账号'
+          : result.error,
+    );
+  }
+
+  Widget _sharePoolCard(BuildContext context) {
+    final share = services.cloudShare;
+    final config = share.config;
+    final result = share.lastResult;
+    final status = !config.isConfigured
+        ? '未配置。填写账号池地址和邀请码后，会自动下发网盘账号，无需登录。'
+        : !config.enabled
+        ? '已停用，账号保持本地缓存。'
+        : result.error.isNotEmpty
+        ? '同步失败：${result.error}'
+        : result.updated.isNotEmpty
+        ? '本次更新：${result.updated.map((p) => p.shortName).join('、')}'
+        : config.lastSync > 0
+        ? '上次同步 ${formatDate(config.lastSync)}'
+        : '已配置，等待同步';
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 6),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: border(context)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Icon(
+                CupertinoIcons.cloud_download,
+                size: 18,
+                color: themeAccent(context),
+              ),
+              const SizedBox(width: 8),
+              const Expanded(
+                child: Text(
+                  '共享账号池',
+                  style: TextStyle(fontWeight: FontWeight.w600),
+                ),
+              ),
+              if (config.isConfigured)
+                Text(
+                  config.enabled ? '已启用' : '已停用',
+                  style: TextStyle(fontSize: 12, color: secondary(context)),
+                ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            status,
+            style: TextStyle(fontSize: 12.5, color: secondary(context)),
+          ),
+          if (result.invalid.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                '${result.invalid.map((p) => p.shortName).join('、')}的凭据格式不对，'
+                '请在账号池换成该平台网页登录的完整 Cookie 或 Token',
+                style: TextStyle(
+                  fontSize: 12.5,
+                  color: Theme.of(context).colorScheme.error,
+                ),
+              ),
+            ),
+          Wrap(
+            spacing: 8,
+            children: [
+              TextButton.icon(
+                onPressed: () => _configureShare(context),
+                icon: const Icon(CupertinoIcons.slider_horizontal_3, size: 16),
+                label: Text(config.isConfigured ? '修改配置' : '填写地址与邀请码'),
+              ),
+              if (config.isConfigured)
+                TextButton.icon(
+                  onPressed: () => _syncShare(context),
+                  icon: const Icon(CupertinoIcons.arrow_clockwise, size: 16),
+                  label: const Text('立即同步'),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _sharedChip(BuildContext context) => Container(
+    margin: const EdgeInsets.only(left: 8),
+    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+    decoration: BoxDecoration(
+      color: themeAccent(context).withValues(alpha: .12),
+      borderRadius: BorderRadius.circular(4),
+    ),
+    child: Text(
+      '共享',
+      style: TextStyle(
+        fontSize: 11,
+        height: 1.4,
+        color: themeAccent(context),
+        fontWeight: FontWeight.w600,
+      ),
+    ),
+  );
+
   @override
   Widget build(BuildContext context) => PageFrame(
     title: platform == null ? '网盘账号管理' : '${platform!.shortName}账号管理',
@@ -92,6 +243,8 @@ class CloudAccountsPage extends StatelessWidget {
       builder: (context, _) => ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          _sharePoolCard(context),
+          const SizedBox(height: 16),
           Text(
             '点击账号切换使用，下载、播放和收藏保留各自的账号归属。',
             style: TextStyle(fontSize: 13, color: secondary(context)),
@@ -159,11 +312,12 @@ class CloudAccountsPage extends StatelessWidget {
                           label: '自定义账号名称',
                           icon: CupertinoIcons.pencil,
                         ),
-                        const AppMenuAction(
-                          value: 'login',
-                          label: '重新登录',
-                          icon: CupertinoIcons.arrow_clockwise,
-                        ),
+                        if (!services.cloudShare.isShared(p, account.id))
+                          const AppMenuAction(
+                            value: 'login',
+                            label: '重新登录',
+                            icon: CupertinoIcons.arrow_clockwise,
+                          ),
                         if (p == CloudPlatform.uc)
                           const AppMenuAction(
                             value: 'tv',
@@ -203,10 +357,18 @@ class CloudAccountsPage extends StatelessWidget {
                                 ? themeAccent(context)
                                 : secondary(context),
                           ),
-                          title: Text(
-                            account.name,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
+                          title: Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  account.name,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                              if (services.cloudShare.isShared(p, account.id))
+                                _sharedChip(context),
+                            ],
                           ),
                           subtitle: Text(
                             [
@@ -238,11 +400,12 @@ class CloudAccountsPage extends StatelessWidget {
                                 label: '自定义名称',
                                 icon: CupertinoIcons.pencil,
                               ),
-                              const AppMenuAction(
-                                value: 'login',
-                                label: '重新登录',
-                                icon: CupertinoIcons.arrow_clockwise,
-                              ),
+                              if (!services.cloudShare.isShared(p, account.id))
+                                const AppMenuAction(
+                                  value: 'login',
+                                  label: '重新登录',
+                                  icon: CupertinoIcons.arrow_clockwise,
+                                ),
                               if (p == CloudPlatform.uc)
                                 const AppMenuAction(
                                   value: 'tv',
