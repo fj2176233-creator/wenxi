@@ -78,9 +78,25 @@ jobs:
       - name: 列出产物
         if: always()
         run: Get-ChildItem -Recurse build/app/outputs/flutter-apk -ErrorAction SilentlyContinue | Select-Object Name,Length
+      - name: 用测试 keystore 签名（产出可直接安装的包）
+        run: |
+          $bt = Join-Path $env:ANDROID_HOME 'build-tools/36.0.0'
+          $apk = 'build/app/outputs/flutter-apk/app-release.apk'
+          $signed = 'build/app/outputs/flutter-apk/app-release-signed.apk'
+          if (-not (Test-Path $apk)) { throw "未找到 $apk" }
+          keytool -genkeypair -v -keystore ci.jks -keyalg RSA -keysize 2048 -validity 10000 `
+            -alias ci -storepass android123 -keypass android123 `
+            -dname "CN=AsterLink Share CI, O=local, C=CN"
+          if ($LASTEXITCODE -ne 0) { throw 'keystore 生成失败' }
+          & "$bt/apksigner.bat" sign --ks ci.jks --ks-pass pass:android123 --key-pass pass:android123 `
+            --out $signed $apk
+          if ($LASTEXITCODE -ne 0) { throw 'apksigner sign 失败' }
+          & "$bt/apksigner.bat" verify --print-certs $signed
+          Get-ChildItem build/app/outputs/flutter-apk | Select-Object Name,Length
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: apk
-          path: build/app/outputs/flutter-apk/*.apk
+          path: |
+            build/app/outputs/flutter-apk/*.apk
           if-no-files-found: warn
