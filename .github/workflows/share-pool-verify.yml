@@ -1,8 +1,8 @@
 name: share-pool-verify
 
 # 只为验证「共享账号池」这次改造：
-#   analyze 作业拿静态分析结论，build 作业顺带出未签名 APK。
-# 两个作业互不依赖，analyze 先出结果。
+#   analyze  用项目锁定的 Flutter 3.41.4 跑静态分析
+#   build    照抄仓库自带 CI 的安卓配方（含 Go 现场编译 gopeed aar），出未签名 APK
 
 on:
   push:
@@ -18,7 +18,12 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
+          flutter-version: '3.41.4'
           cache: true
+      - name: pub 镜像换成官方
+        shell: bash
+        run: |
+          python -c "from pathlib import Path; p=Path('pubspec.lock'); p.write_text(p.read_text().replace('https://pub.flutter-io.cn','https://pub.dev'))"
       - name: 工具链版本
         run: |
           flutter --version
@@ -29,8 +34,7 @@ jobs:
         run: |
           set +e
           flutter analyze > "$GITHUB_WORKSPACE/analyze.log" 2>&1
-          code=$?
-          echo "ANALYZE_EXIT=$code" >> "$GITHUB_WORKSPACE/analyze.log"
+          echo "ANALYZE_EXIT=$?" >> "$GITHUB_WORKSPACE/analyze.log"
           cat "$GITHUB_WORKSPACE/analyze.log"
           exit 0
       - uses: actions/upload-artifact@v4
@@ -40,24 +44,43 @@ jobs:
           path: analyze.log
 
   build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
+    runs-on: windows-2022
+    timeout-minutes: 100
+    env:
+      PUB_HOSTED_URL: https://pub.dev
+      FLUTTER_STORAGE_BASE_URL: https://storage.googleapis.com
+      GOPROXY: https://proxy.golang.org,direct
+      GOTOOLCHAIN: go1.24.7
+      GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx4g
+    defaults:
+      run:
+        shell: pwsh
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - name: 工具链（仓库自带 setup：python/go/java21/flutter 3.41.4 + 换 pub 镜像）
+        uses: ./.github/actions/setup
         with:
-          distribution: zulu
-          java-version: '17'
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          cache: true
-      - name: pub get
-        run: flutter pub get
-      - name: build apk（无 keystore，产出未签名包）
-        run: flutter build apk --release --no-shrink
+          android: 'true'
+      - name: Android SDK 组件
+        run: |
+          $sdkmanager = Join-Path $env:ANDROID_HOME 'cmdline-tools/latest/bin/sdkmanager.bat'
+          & $sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358'
+          if ($LASTEXITCODE -ne 0) { throw 'Android SDK installation failed.' }
+      - name: 产出前记录无 aar 状态
+        run: |
+          if (Test-Path -LiteralPath 'android/app/libs/gopeed-1.8.1.aar') {
+            Write-Host 'aar 已存在'
+          } else {
+            Write-Host 'aar 不存在，将由 build-android.ps1 调用 native/build-gopeed.ps1 现编'
+          }
+      - name: 构建未签名 APK
+        run: ./tool/build-android.ps1 -BuildConfig config/build.community.json -Unsigned
+      - name: 列出产物
+        if: always()
+        run: Get-ChildItem -Recurse build/app/outputs/flutter-apk -ErrorAction SilentlyContinue | Select-Object Name,Length
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: apk
           path: build/app/outputs/flutter-apk/*.apk
+          if-no-files-found: warn
