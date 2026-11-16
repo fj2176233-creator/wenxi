@@ -16,6 +16,7 @@ import 'data/cleanup_outbox.dart';
 import 'data/resource_link_checks.dart';
 import 'data/resource_link_probe.dart';
 import 'data/cloud_repository.dart';
+import 'data/cloud_credential_sync.dart';
 import 'data/cloud_favorites.dart';
 import 'data/cloud_command_history.dart';
 import 'data/http.dart';
@@ -107,6 +108,7 @@ class AppServices extends ChangeNotifier {
   }) : _instanceLock = instanceLock,
        _preloadResources = platformFeatures || resourceSearch != null {
     vault = Vault(store);
+    cloudShare = CloudCredentialSync(store, vault, clock: clock);
     if (platformFeatures && WindowsPlayerComponents.isSupported) {
       WindowsPlayerComponents.shared.acceleration = () =>
           settings.githubAcceleration;
@@ -423,6 +425,7 @@ class AppServices extends ChangeNotifier {
   final DateTime Function() clock;
   final RandomAccessFile? _instanceLock;
   late final Vault vault;
+  late final CloudCredentialSync cloudShare;
   late final RemoteControlService control;
   late final AnnouncementService announcements;
   final _enabledClouds = <CloudPlatform>{};
@@ -747,6 +750,24 @@ class AppServices extends ChangeNotifier {
       _readExternalOpensInBackground();
     }
     await vault.initializeAccounts();
+    // 共享账号池：账号表就绪后在后台拉一次。
+    // 不 await——NAS 失联时不能让应用卡在启动页。
+    unawaited(
+      cloudShare
+          .syncIfNeeded()
+          .then<void>((result) {
+            if (_closed) return;
+            if (result.updated.isNotEmpty) {
+              for (final platform in result.updated) {
+                unawaited(refreshAccount(platform));
+              }
+            }
+            notifyListeners();
+          })
+          .catchError((Object error, StackTrace stack) {
+            DiagnosticLog.error('cloud.share_sync_failed', error, stack);
+          }),
+    );
     DiagnosticLog.event(
       'app.accounts_ready',
       fields: {'elapsedMs': startup.elapsedMilliseconds},
@@ -839,7 +860,10 @@ class AppServices extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> refreshAccount(CloudPlatform platform) async {
+  Future<void> refreshAccount(
+    CloudPlatform platform, {
+    bool shareRetry = true,
+  }) async {
     final owner = vault.activeAccountId(platform);
     final credential = vault.credential(platform);
     if (!control.cloudEnabled(platform) ||
@@ -891,6 +915,15 @@ class AppServices extends ChangeNotifier {
       );
       if (vault.activeAccountId(platform) == owner &&
           vault.credential(platform)?.updatedAt == credential?.updatedAt) {
+        if (e is AccountLoginRequired && shareRetry) {
+          // 凭据过期时先向账号池要一份新的：用户只需在 NAS 换一次，
+          // 朋友的设备不用重新登录。只重试一轮，避免账号池返回旧值时打转。
+          final refreshed = await cloudShare.refreshOne(platform);
+          if (refreshed && !_closed) {
+            unawaited(refreshAccount(platform, shareRetry: false));
+            return;
+          }
+        }
         if (e is AccountLoginRequired) {
           accounts.remove(platform);
           accountNeedsLogin.add(platform);
@@ -912,8 +945,28 @@ class AppServices extends ChangeNotifier {
     }
   }
 
+  /// 保存共享账号池配置。地址或邀请码变了就立刻同步一次。
+  Future<CloudShareSyncResult> configureCloudShare({
+    String? server,
+    String? code,
+    bool? enabled,
+    bool syncNow = true,
+  }) async {
+    await cloudShare.configure(server: server, code: code, enabled: enabled);
+    if (!syncNow) {
+      if (!_closed) notifyListeners();
+      return const CloudShareSyncResult.notRequested();
+    }
+    final result = await cloudShare.sync();
+    for (final platform in result.updated) {
+      unawaited(refreshAccount(platform));
+    }
+    if (!_closed) notifyListeners();
+    return result;
+  }
+
   Future<void> refreshAccounts() async =>
-      Future.wait(CloudPlatform.values.map(refreshAccount));
+      Future.wait(CloudPlatform.values.map((p) => refreshAccount(p)));
 
   Future<void> switchCloudAccount(CloudPlatform platform, String id) async {
     login.invalidate(platform);
